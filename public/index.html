@@ -1,65 +1,310 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Mic to Text with Groq</title>
-  <style>
-    body { font-family: sans-serif; margin: 2rem; }
-    button { margin-right: 1rem; }
-    textarea { width: 100%; height: 120px; margin-top: 1rem; }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Speech Transcription</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+        }
+        
+        .controls {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 0 10px;
+            transition: background-color 0.3s;
+        }
+        
+        button:hover:not(:disabled) {
+            background-color: #0056b3;
+        }
+        
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .recording {
+            background-color: #dc3545 !important;
+        }
+        
+        .recording:hover {
+            background-color: #c82333 !important;
+        }
+        
+        .status {
+            text-align: center;
+            margin: 20px 0;
+            font-weight: bold;
+        }
+        
+        .status.recording {
+            color: #dc3545;
+        }
+        
+        .status.ready {
+            color: #28a745;
+        }
+        
+        .status.error {
+            color: #dc3545;
+        }
+        
+        .transcription-area {
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            padding: 20px;
+            min-height: 200px;
+            background-color: #fafafa;
+            font-size: 16px;
+            line-height: 1.6;
+        }
+        
+        .partial-text {
+            color: #666;
+            font-style: italic;
+        }
+        
+        .final-text {
+            color: #333;
+        }
+        
+        .transcript-line {
+            margin-bottom: 10px;
+            padding: 5px;
+            border-left: 3px solid #007bff;
+            padding-left: 10px;
+        }
+        
+        .error-message {
+            background-color: #f8d7da;
+            color: #721c24;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+    </style>
 </head>
 <body>
-  <h1>🎤 Groq Mic Transcription</h1>
-  <button onclick="startRecording()">Start Recording</button>
-  <button onclick="stopRecording()">Stop & Transcribe</button>
+    <div class="container">
+        <h1>🎤 Live Speech Transcription</h1>
+        
+        <div class="controls">
+            <button id="startBtn">Start Recording</button>
+            <button id="stopBtn" disabled>Stop Recording</button>
+            <button id="clearBtn">Clear Text</button>
+        </div>
+        
+        <div id="status" class="status">Ready to start recording</div>
+        
+        <div class="transcription-area" id="transcriptionArea">
+            <div class="partial-text" id="partialText"></div>
+            <div id="finalTranscripts"></div>
+        </div>
+    </div>
 
-  <h3>Transcribed Text:</h3>
-  <textarea id="output" readonly></textarea>
-
-  <script>
-    let mediaRecorder;
-    let audioChunks = [];
-
-    async function startRecording() {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorder = new MediaRecorder(stream);
-
-      mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-
-      mediaRecorder.onstop = async () => {
-        const blob = new Blob(audioChunks, { type: 'audio/webm' });
-        audioChunks = [];
-
-        const base64 = await blobToBase64(blob);
-
-        const res = await fetch('/transcribe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ audioBase64: base64 })
+    <script>
+        class SpeechTranscriber {
+            constructor() {
+                this.ws = null;
+                this.mediaRecorder = null;
+                this.audioStream = null;
+                this.isRecording = false;
+                
+                this.startBtn = document.getElementById('startBtn');
+                this.stopBtn = document.getElementById('stopBtn');
+                this.clearBtn = document.getElementById('clearBtn');
+                this.status = document.getElementById('status');
+                this.partialText = document.getElementById('partialText');
+                this.finalTranscripts = document.getElementById('finalTranscripts');
+                
+                this.setupEventListeners();
+                this.connectWebSocket();
+            }
+            
+            setupEventListeners() {
+                this.startBtn.addEventListener('click', () => this.startRecording());
+                this.stopBtn.addEventListener('click', () => this.stopRecording());
+                this.clearBtn.addEventListener('click', () => this.clearTranscripts());
+            }
+            
+            connectWebSocket() {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${protocol}//${window.location.host}`;                
+                this.ws = new WebSocket(wsUrl);
+                
+                this.ws.onopen = () => {
+                    console.log('WebSocket connected');
+                    this.updateStatus('Ready to start recording', 'ready');
+                };
+                
+                this.ws.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.type === 'partial') {
+                        this.partialText.textContent = data.text;
+                    } else if (data.type === 'final') {
+                        if (data.text.trim()) {
+                            this.addFinalTranscript(data.text);
+                        }
+                        this.partialText.textContent = '';
+                    } else if (data.type === 'error') {
+                        this.showError(data.message);
+                    }
+                };
+                
+                this.ws.onclose = () => {
+                    console.log('WebSocket disconnected');
+                    this.updateStatus('Connection lost. Please refresh the page.', 'error');
+                };
+                
+                this.ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    this.updateStatus('Connection error', 'error');
+                };
+            }
+            
+            async startRecording() {
+                try {
+                    this.audioStream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            sampleRate: 16000,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true
+                        } 
+                    });
+                    
+                    // Create AudioContext to process audio
+                    const audioContext = new AudioContext({ sampleRate: 16000 });
+                    const source = audioContext.createMediaStreamSource(this.audioStream);
+                    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+                    
+                    processor.onaudioprocess = (event) => {
+                        if (this.isRecording && this.ws.readyState === WebSocket.OPEN) {
+                            const inputBuffer = event.inputBuffer.getChannelData(0);
+                            const int16Array = new Int16Array(inputBuffer.length);
+                            
+                            // Convert float32 to int16
+                            for (let i = 0; i < inputBuffer.length; i++) {
+                                int16Array[i] = Math.max(-32768, Math.min(32767, inputBuffer[i] * 32768));
+                            }
+                            
+                            this.ws.send(int16Array.buffer);
+                        }
+                    };
+                    
+                    source.connect(processor);
+                    processor.connect(audioContext.destination);
+                    
+                    this.audioProcessor = processor;
+                    this.audioContext = audioContext;
+                    
+                    this.isRecording = true;
+                    this.startBtn.disabled = true;
+                    this.stopBtn.disabled = false;
+                    this.startBtn.textContent = 'Recording...';
+                    this.startBtn.classList.add('recording');
+                    
+                    this.updateStatus('🔴 Recording... Speak now!', 'recording');
+                    
+                    // Send start message
+                    this.ws.send(JSON.stringify({ type: 'start' }));
+                    
+                } catch (error) {
+                    console.error('Error starting recording:', error);
+                    this.showError('Failed to access microphone. Please ensure you have granted permission.');
+                }
+            }
+            
+            stopRecording() {
+                this.isRecording = false;
+                
+                if (this.audioStream) {
+                    this.audioStream.getTracks().forEach(track => track.stop());
+                }
+                
+                if (this.audioContext) {
+                    this.audioContext.close();
+                }
+                
+                // Send stop message
+                if (this.ws.readyState === WebSocket.OPEN) {
+                    this.ws.send(JSON.stringify({ type: 'stop' }));
+                }
+                
+                this.startBtn.disabled = false;
+                this.stopBtn.disabled = true;
+                this.startBtn.textContent = 'Start Recording';
+                this.startBtn.classList.remove('recording');
+                
+                this.updateStatus('Recording stopped', 'ready');
+            }
+            
+            clearTranscripts() {
+                this.finalTranscripts.innerHTML = '';
+                this.partialText.textContent = '';
+            }
+            
+            addFinalTranscript(text) {
+                const transcriptDiv = document.createElement('div');
+                transcriptDiv.className = 'transcript-line final-text';
+                transcriptDiv.textContent = text;
+                this.finalTranscripts.appendChild(transcriptDiv);
+                
+                // Auto-scroll to bottom
+                transcriptDiv.scrollIntoView({ behavior: 'smooth' });
+            }
+            
+            updateStatus(message, type) {
+                this.status.textContent = message;
+                this.status.className = `status ${type}`;
+            }
+            
+            showError(message) {
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'error-message';
+                errorDiv.textContent = message;
+                this.status.parentNode.insertBefore(errorDiv, this.status.nextSibling);
+                
+                setTimeout(() => {
+                    errorDiv.remove();
+                }, 5000);
+            }
+        }
+        
+        // Initialize the transcriber when the page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new SpeechTranscriber();
         });
-
-        const data = await res.json();
-        document.getElementById('output').value = data.text || data.error || 'Transcription failed';
-      };
-
-      mediaRecorder.start();
-    }
-
-    function stopRecording() {
-      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-        mediaRecorder.stop();
-      }
-    }
-
-    function blobToBase64(blob) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-    }
-  </script>
+    </script>
 </body>
 </html>
